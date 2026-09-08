@@ -152,7 +152,11 @@ providers.sort(
     providerOrder.indexOf(left.name) - providerOrder.indexOf(right.name),
 );
 
-function buildPrompt(messages: SavedMessage[], text: string): string {
+function buildPrompt(
+  messages: SavedMessage[],
+  text: string,
+  urlContext?: { url: string; title?: string; text: string },
+): string {
   const history = messages
     .map((message) => `${message.role}: ${message.text}`)
     .join("\n");
@@ -162,6 +166,9 @@ function buildPrompt(messages: SavedMessage[], text: string): string {
     "Отвечай кратко, естественно и по существу.",
     history ? `История диалога:\n${history}` : "",
     `Новое сообщение пользователя:\n${text}`,
+    urlContext
+      ? `Содержимое публичной страницы ${urlContext.url}${urlContext.title ? ` (${urlContext.title})` : ""}:\n${urlContext.text}`
+      : "",
   ]
     .filter(Boolean)
     .join("\n\n");
@@ -170,12 +177,13 @@ function buildPrompt(messages: SavedMessage[], text: string): string {
 export async function generateAnswer(
   messages: SavedMessage[],
   text: string,
+  urlContext?: { url: string; title?: string; text: string },
 ): Promise<{ provider: ProviderName; answer: string }> {
   if (providers.length === 0) {
     throw new Error("No AI providers configured");
   }
 
-  const prompt = buildPrompt(messages, text);
+  const prompt = buildPrompt(messages, text, urlContext);
   const errors: string[] = [];
   const startedAt = new Date().toISOString();
   const requestStarted = performance.now();

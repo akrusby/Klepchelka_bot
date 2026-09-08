@@ -2,6 +2,7 @@ import "dotenv/config";
 import { Bot } from "grammy";
 import { generateAnswer, getAiDiagnostics } from "./ai.js";
 import { getMessageCount, getRecentMessages, saveMessage } from "./database.js";
+import { loadUrlContext } from "./url-loader.js";
 
 const token = process.env.BOT_TOKEN;
 const allowedChatIds = (
@@ -98,7 +99,15 @@ bot.on("message:text", async (ctx) => {
 	console.log(`Received: ${text}`);
 	saveMessage(chatId, "user", text);
 
-	const { provider, answer } = await generateAnswer(history, text);
+	let urlContext;
+	try {
+		urlContext = await loadUrlContext(text);
+	} catch (error) {
+		const message = error instanceof Error ? error.message : String(error);
+		console.error(`[URL] fetch failed error=${message}`);
+	}
+
+	const { provider, answer } = await generateAnswer(history, text, urlContext);
 	console.log(`Using provider: ${provider}`);
 	saveMessage(chatId, "assistant", answer);
 
