@@ -4,21 +4,26 @@ import { generateAnswer, getAiDiagnostics } from "./ai.js";
 import { getMessageCount, getRecentMessages, saveMessage } from "./database.js";
 
 const token = process.env.BOT_TOKEN;
-const allowedChatId = Number(process.env.ALLOWED_CHAT_ID);
+const allowedChatIds = (
+	process.env.ALLOWED_CHAT_IDS ?? process.env.ALLOWED_CHAT_ID ?? ""
+)
+	.split(",")
+	.map((value) => Number(value.trim()))
+	.filter((value) => Number.isInteger(value) && value !== 0);
 
 if (!token) {
 	throw new Error("BOT_TOKEN is not set");
 }
 
-if (!allowedChatId) {
-	throw new Error("ALLOWED_CHAT_ID is not set");
+if (allowedChatIds.length === 0) {
+	throw new Error("ALLOWED_CHAT_IDS is not set");
 }
 
 const bot = new Bot(token);
 
 // Проверяем доступ пользователя
 bot.use(async (ctx, next) => {
-	if (ctx.chat?.id !== allowedChatId) {
+	if (!ctx.chat || !allowedChatIds.includes(ctx.chat.id)) {
 		console.log(
 			`Blocked message from chat ${ctx.chat?.id}`
 		);
