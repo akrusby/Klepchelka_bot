@@ -107,11 +107,18 @@ bot.on("message:text", async (ctx) => {
 		console.error(`[URL] fetch failed error=${message}`);
 	}
 
-	const { provider, answer } = await generateAnswer(history, text, urlContext);
-	console.log(`Using provider: ${provider}`);
-	saveMessage(chatId, "assistant", answer);
-
-	await ctx.reply(answer);
+	try {
+		const { provider, answer } = await generateAnswer(history, text, urlContext);
+		console.log(`Using provider: ${provider}`);
+		saveMessage(chatId, "assistant", answer);
+		await ctx.reply(answer);
+	} catch (error) {
+		const message = error instanceof Error ? error.message : String(error);
+		console.error(`Unable to answer message: ${message}`);
+		await ctx.reply(
+			"Сейчас все AI-провайдеры недоступны. Попробуйте повторить запрос через минуту.",
+		);
+	}
 });
 
 // Обработка ошибок

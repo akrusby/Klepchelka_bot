@@ -32,6 +32,9 @@ const anthropicKey = process.env.ANTHROPIC_API_KEY;
 
 const providers: Provider[] = [];
 let lastRequest: LastRequestDiagnostics | undefined;
+const MAX_HISTORY_CHARS = 8_000;
+const MAX_USER_TEXT_CHARS = 4_000;
+const MAX_URL_CONTEXT_CHARS = 12_000;
 
 if (geminiKey) {
   providers.push({
@@ -159,15 +162,16 @@ function buildPrompt(
 ): string {
   const history = messages
     .map((message) => `${message.role}: ${message.text}`)
-    .join("\n");
+    .join("\n")
+    .slice(-MAX_HISTORY_CHARS);
 
   return [
     "Ты полезный русскоязычный ассистент в Telegram.",
     "Отвечай кратко, естественно и по существу.",
     history ? `История диалога:\n${history}` : "",
-    `Новое сообщение пользователя:\n${text}`,
+    `Новое сообщение пользователя:\n${text.slice(0, MAX_USER_TEXT_CHARS)}`,
     urlContext
-      ? `Содержимое публичной страницы ${urlContext.url}${urlContext.title ? ` (${urlContext.title})` : ""}:\n${urlContext.text}`
+      ? `Содержимое публичной страницы ${urlContext.url}${urlContext.title ? ` (${urlContext.title})` : ""}:\n${urlContext.text.slice(0, MAX_URL_CONTEXT_CHARS)}`
       : "",
   ]
     .filter(Boolean)

@@ -3,6 +3,7 @@ import * as cheerio from "cheerio";
 const MAX_RESPONSE_BYTES = 1_000_000;
 const FETCH_TIMEOUT_MS = 12_000;
 const BROWSER_TIMEOUT_MS = 20_000;
+const MAX_PAGE_TEXT_CHARS = 12_000;
 
 export type UrlContext = {
   url: string;
@@ -61,7 +62,8 @@ function extractText(body: string, contentType: string): { title?: string; text:
   const $ = cheerio.load(body);
   $("script, style, noscript, svg, nav, footer, header, form").remove();
   const title = $("title").first().text().trim() || undefined;
-  const text = $("body").text().replace(/\s+/g, " ").trim();
+  const content = $("main, article, #mw-content-text, body").first();
+  const text = content.text().replace(/\s+/g, " ").trim();
 
   return { title, text };
 }
@@ -143,7 +145,7 @@ export async function loadUrlContext(message: string): Promise<UrlContext | unde
 
     const body = await readLimitedBody(response);
     const extracted = extractText(body, response.headers.get("content-type") ?? "");
-    const text = extracted.text.slice(0, 30_000);
+    const text = extracted.text.slice(0, MAX_PAGE_TEXT_CHARS);
     const durationMs = Math.round(performance.now() - started);
 
     if (!text) {
