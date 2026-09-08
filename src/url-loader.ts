@@ -73,7 +73,7 @@ async function loadWithBrowser(url: string): Promise<UrlContext> {
   console.log(`[URL] browser fetch started url=${url}`);
   const { chromium } = await import("playwright");
   const browser = await chromium.launch({
-    headless: true,
+    headless: process.env.BROWSER_HEADLESS !== "false",
     args: ["--no-sandbox", "--disable-dev-shm-usage"],
   });
 
