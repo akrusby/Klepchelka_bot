@@ -9,6 +9,21 @@ type Provider = {
   generate: (prompt: string) => Promise<string>;
 };
 
+type AttemptDiagnostics = {
+  provider: ProviderName;
+  durationMs: number;
+  error?: string;
+};
+
+type LastRequestDiagnostics = {
+  startedAt: string;
+  durationMs: number;
+  promptChars: number;
+  provider?: ProviderName;
+  attempts: AttemptDiagnostics[];
+  error?: string;
+};
+
 const geminiKey = process.env.GEMINI_API_KEY;
 const groqKey = process.env.GROQ_API_KEY;
 const openRouterKey = process.env.OPENROUTER_API_KEY;
@@ -16,6 +31,7 @@ const openaiKey = process.env.OPENAI_API_KEY;
 const anthropicKey = process.env.ANTHROPIC_API_KEY;
 
 const providers: Provider[] = [];
+let lastRequest: LastRequestDiagnostics | undefined;
 
 if (geminiKey) {
   providers.push({
@@ -151,18 +167,65 @@ export async function generateAnswer(
 
   const prompt = buildPrompt(messages, text);
   const errors: string[] = [];
+  const startedAt = new Date().toISOString();
+  const requestStarted = performance.now();
+  const attempts: AttemptDiagnostics[] = [];
+
+  console.log(
+    `[AI] request started promptChars=${prompt.length} historyMessages=${messages.length}`,
+  );
 
   for (const provider of providers) {
+    const attemptStarted = performance.now();
+    console.log(`[AI] attempt provider=${provider.name} started`);
+
     try {
       const answer = await provider.generate(prompt);
-      console.log(`AI response from ${provider.name}`);
+      const durationMs = Math.round(performance.now() - attemptStarted);
+      const totalDurationMs = Math.round(performance.now() - requestStarted);
+      attempts.push({ provider: provider.name, durationMs });
+      lastRequest = {
+        startedAt,
+        durationMs: totalDurationMs,
+        promptChars: prompt.length,
+        provider: provider.name,
+        attempts,
+      };
+      console.log(
+        `[AI] attempt provider=${provider.name} succeeded durationMs=${durationMs} totalMs=${totalDurationMs}`,
+      );
       return { provider: provider.name, answer };
     } catch (error) {
+      const durationMs = Math.round(performance.now() - attemptStarted);
       const message = error instanceof Error ? error.message : String(error);
+      attempts.push({
+        provider: provider.name,
+        durationMs,
+        error: message.slice(0, 300),
+      });
       errors.push(`${provider.name}: ${message}`);
-      console.error(`AI provider ${provider.name} failed: ${message}`);
+      console.error(
+        `[AI] attempt provider=${provider.name} failed durationMs=${durationMs} error=${message}`,
+      );
     }
   }
 
+  const totalDurationMs = Math.round(performance.now() - requestStarted);
+  lastRequest = {
+    startedAt,
+    durationMs: totalDurationMs,
+    promptChars: prompt.length,
+    attempts,
+    error: errors.join(" | ").slice(0, 1000),
+  };
+  console.error(`[AI] request failed totalMs=${totalDurationMs}`);
+
   throw new Error(`All AI providers failed: ${errors.join(" | ")}`);
+}
+
+export function getAiDiagnostics() {
+  return {
+    configuredProviders: providers.map((provider) => provider.name),
+    lastRequest,
+  };
 }

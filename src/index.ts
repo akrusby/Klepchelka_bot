@@ -1,7 +1,7 @@
 import "dotenv/config";
 import { Bot } from "grammy";
-import { generateAnswer } from "./ai.js";
-import { getRecentMessages, saveMessage } from "./database.js";
+import { generateAnswer, getAiDiagnostics } from "./ai.js";
+import { getMessageCount, getRecentMessages, saveMessage } from "./database.js";
 
 const token = process.env.BOT_TOKEN;
 const allowedChatId = Number(process.env.ALLOWED_CHAT_ID);
@@ -52,6 +52,36 @@ bot.command("memory", async (ctx) => {
 		.join("\n\n");
 
 	await ctx.reply(`Последние сообщения:\n\n${history}`);
+});
+
+// Диагностика без секретов
+bot.command("diagnostics", async (ctx) => {
+	const ai = getAiDiagnostics();
+	const lastRequest = ai.lastRequest;
+	const memory = process.memoryUsage();
+	const attempts = lastRequest?.attempts
+		.map((attempt) => {
+			const error = attempt.error ? ` error=${attempt.error}` : "";
+			return `${attempt.provider}: ${attempt.durationMs} ms${error}`;
+		})
+		.join("\n") ?? "нет данных";
+
+	const diagnostics = [
+		"Диагностика Klepchelka_bot",
+		`Время работы: ${Math.round(process.uptime())} сек.`,
+		`Node.js: ${process.version}`,
+		`Память процесса: ${Math.round(memory.rss / 1024 / 1024)} MB RSS`,
+		`Сообщений в SQLite: ${getMessageCount(ctx.chat.id)}`,
+		`Провайдеры: ${ai.configuredProviders.join(" -> ") || "нет"}`,
+		"",
+		"Последний AI-запрос:",
+		lastRequest
+			? `Всего: ${lastRequest.durationMs} ms, prompt: ${lastRequest.promptChars} символов, ответ: ${lastRequest.provider ?? "нет"}`
+			: "нет данных",
+		attempts,
+	];
+
+	await ctx.reply(diagnostics.join("\n"));
 });
 
 // Любой обычный текст

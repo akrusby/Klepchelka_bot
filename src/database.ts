@@ -45,3 +45,11 @@ export function getRecentMessages(
     `)
     .all(chatId, limit) as SavedMessage[];
 }
+
+export function getMessageCount(chatId: number): number {
+  const result = db
+    .prepare("SELECT COUNT(*) AS count FROM messages WHERE chat_id = ?")
+    .get(chatId) as { count: number };
+
+  return result.count;
+}
