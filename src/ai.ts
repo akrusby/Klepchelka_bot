@@ -42,7 +42,7 @@ if (geminiKey) {
         `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${encodeURIComponent(geminiKey)}`,
         {
           method: "POST",
-          signal: AbortSignal.timeout(30000),
+          signal: AbortSignal.timeout(8000),
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({
             contents: [{ parts: [{ text: prompt }] }],
@@ -141,6 +141,16 @@ if (anthropicKey) {
     },
   });
 }
+
+const providerOrder = (
+  process.env.AI_PROVIDER_ORDER ??
+  "groq,gemini,openrouter,openai,anthropic"
+).split(",");
+
+providers.sort(
+  (left, right) =>
+    providerOrder.indexOf(left.name) - providerOrder.indexOf(right.name),
+);
 
 function buildPrompt(messages: SavedMessage[], text: string): string {
   const history = messages
