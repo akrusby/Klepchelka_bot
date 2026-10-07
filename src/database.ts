@@ -15,6 +15,13 @@ export type DailyTask = {
   completion_text: string | null;
 };
 
+export type PersonalTask = {
+  id: number;
+  task_date: string;
+  text: string;
+  status: "pending" | "completed";
+};
+
 db.exec(`
   CREATE TABLE IF NOT EXISTS messages (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -33,6 +40,21 @@ db.exec(`
     completed_at TEXT,
     completion_text TEXT
   );
+
+  CREATE TABLE IF NOT EXISTS personal_tasks (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    chat_id INTEGER NOT NULL,
+    user_id INTEGER NOT NULL,
+    task_date TEXT NOT NULL,
+    text TEXT NOT NULL,
+    status TEXT NOT NULL CHECK (status IN ('pending', 'completed')),
+    created_at TEXT NOT NULL,
+    completed_at TEXT,
+    completion_text TEXT
+  );
+
+  CREATE INDEX IF NOT EXISTS personal_tasks_owner_date_status
+  ON personal_tasks (chat_id, user_id, task_date, status);
 `);
 
 export function saveMessage(
@@ -85,19 +107,85 @@ export function saveSentDailyTask(
   taskDate: string,
   chatId: number,
   messageId: number,
+  userId?: number,
+  text?: string,
 ): boolean {
-  const result = db.prepare(`
-    INSERT OR IGNORE INTO daily_tasks (
-      task_date,
-      chat_id,
-      status,
-      sent_message_id,
-      sent_at
-    )
-    VALUES (?, ?, 'sent', ?, ?)
-  `).run(taskDate, chatId, messageId, new Date().toISOString());
+  const save = db.transaction(() => {
+    const result = db.prepare(`
+      INSERT OR IGNORE INTO daily_tasks (
+        task_date,
+        chat_id,
+        status,
+        sent_message_id,
+        sent_at
+      )
+      VALUES (?, ?, 'sent', ?, ?)
+    `).run(taskDate, chatId, messageId, new Date().toISOString());
 
-  return result.changes === 1;
+    if (result.changes !== 1) {
+      return false;
+    }
+
+    if (userId !== undefined && text !== undefined) {
+      db.prepare(`
+        INSERT INTO personal_tasks (
+          chat_id,
+          user_id,
+          task_date,
+          text,
+          status,
+          created_at
+        )
+        VALUES (?, ?, ?, ?, 'pending', ?)
+      `).run(chatId, userId, taskDate, text, new Date().toISOString());
+    }
+
+    return true;
+  });
+
+  return save();
+}
+
+export function assignSentDailyTaskToUser(
+  taskDate: string,
+  chatId: number,
+  userId: number,
+  text: string,
+): void {
+  const task = getDailyTask(taskDate);
+  if (!task || task.chat_id !== chatId || task.status !== "sent") {
+    return;
+  }
+
+  db.prepare(`
+    INSERT INTO personal_tasks (
+      chat_id,
+      user_id,
+      task_date,
+      text,
+      status,
+      created_at
+    )
+    SELECT ?, ?, ?, ?, 'pending', ?
+    WHERE NOT EXISTS (
+      SELECT 1
+      FROM personal_tasks
+      WHERE chat_id = ?
+        AND user_id = ?
+        AND task_date = ?
+        AND text = ?
+    )
+  `).run(
+    chatId,
+    userId,
+    taskDate,
+    text,
+    new Date().toISOString(),
+    chatId,
+    userId,
+    taskDate,
+    text,
+  );
 }
 
 export function completeDailyTask(
@@ -114,6 +202,71 @@ export function completeDailyTask(
       AND chat_id = ?
       AND status = 'sent'
   `).run(new Date().toISOString(), completionText, taskDate, chatId);
+
+  return result.changes === 1;
+}
+
+export function getPendingTasks(
+  chatId: number,
+  userId: number,
+  taskDate: string,
+): PersonalTask[] {
+  return db
+    .prepare(`
+      SELECT id, task_date, text, status
+      FROM personal_tasks
+      WHERE chat_id = ?
+        AND user_id = ?
+        AND task_date = ?
+        AND status = 'pending'
+      ORDER BY id
+    `)
+    .all(chatId, userId, taskDate) as PersonalTask[];
+}
+
+export function addPersonalTask(
+  chatId: number,
+  userId: number,
+  taskDate: string,
+  text: string,
+): number {
+  const result = db.prepare(`
+    INSERT INTO personal_tasks (
+      chat_id,
+      user_id,
+      task_date,
+      text,
+      status,
+      created_at
+    )
+    VALUES (?, ?, ?, ?, 'pending', ?)
+  `).run(chatId, userId, taskDate, text, new Date().toISOString());
+
+  return Number(result.lastInsertRowid);
+}
+
+export function completePersonalTask(
+  taskId: number,
+  chatId: number,
+  userId: number,
+  completionText: string,
+): boolean {
+  const result = db.prepare(`
+    UPDATE personal_tasks
+    SET status = 'completed',
+        completed_at = ?,
+        completion_text = ?
+    WHERE id = ?
+      AND chat_id = ?
+      AND user_id = ?
+      AND status = 'pending'
+  `).run(
+    new Date().toISOString(),
+    completionText,
+    taskId,
+    chatId,
+    userId,
+  );
 
   return result.changes === 1;
 }

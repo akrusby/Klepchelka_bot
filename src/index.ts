@@ -1,10 +1,14 @@
 import "dotenv/config";
 import { Bot } from "grammy";
-import { generateAnswer, getAiDiagnostics } from "./ai.js";
+import { generateAnswer, getAiDiagnostics, matchCompletedTask } from "./ai.js";
 import {
+	addPersonalTask,
+	assignSentDailyTaskToUser,
 	completeDailyTask,
+	completePersonalTask,
 	getDailyTask,
 	getMessageCount,
+	getPendingTasks,
 	getRecentMessages,
 	saveMessage,
 	saveSentDailyTask,
@@ -14,6 +18,9 @@ import { loadUrlContext } from "./url-loader.js";
 const token = process.env.BOT_TOKEN;
 const dailyTaskChatId = process.env.DAILY_TASK_CHAT_ID
 	? Number(process.env.DAILY_TASK_CHAT_ID)
+	: undefined;
+const dailyTaskUserId = process.env.DAILY_TASK_USER_ID
+	? Number(process.env.DAILY_TASK_USER_ID)
 	: undefined;
 const allowedChatIds = (
 	process.env.ALLOWED_CHAT_IDS ?? process.env.ALLOWED_CHAT_ID ?? ""
@@ -36,6 +43,13 @@ if (
 		!allowedChatIds.includes(dailyTaskChatId))
 ) {
 	throw new Error("DAILY_TASK_CHAT_ID must be an integer in ALLOWED_CHAT_IDS");
+}
+
+if (
+	dailyTaskUserId !== undefined &&
+	(!Number.isSafeInteger(dailyTaskUserId) || dailyTaskUserId <= 0)
+) {
+	throw new Error("DAILY_TASK_USER_ID must be a positive Telegram user ID");
 }
 
 const bot = new Bot(token);
@@ -61,6 +75,12 @@ function getWarsawDateTime(): { date: string; hour: number; minute: number } {
 	};
 }
 
+function shiftDate(date: string, days: number): string {
+	const shifted = new Date(`${date}T00:00:00.000Z`);
+	shifted.setUTCDate(shifted.getUTCDate() + days);
+	return shifted.toISOString().slice(0, 10);
+}
+
 let sendingDailyTask = false;
 
 async function sendDailyTaskIfDue(): Promise<void> {
@@ -76,7 +96,15 @@ async function sendDailyTaskIfDue(): Promise<void> {
 	sendingDailyTask = true;
 	try {
 		const message = await bot.api.sendMessage(dailyTaskChatId, DAILY_TASK_TEXT);
-		if (!saveSentDailyTask(date, dailyTaskChatId, message.message_id)) {
+		if (
+			!saveSentDailyTask(
+				date,
+				dailyTaskChatId,
+				message.message_id,
+				dailyTaskUserId,
+				DAILY_TASK_TEXT,
+			)
+		) {
 			console.error(`[TASK] daily task already recorded date=${date}`);
 		}
 	} catch (error) {
@@ -107,6 +135,15 @@ bot.command("start", async (ctx) => {
 	await ctx.reply(
 		"Привет! Я работаю 🤖\n\nМожешь отправлять мне сообщения или отмечать выполнение задачи командой @Klepchelka_bot готово."
 	);
+});
+
+bot.command("myid", async (ctx) => {
+	const user = ctx.from;
+	if (!user) {
+		await ctx.reply("Не удалось определить Telegram user ID.");
+		return;
+	}
+	await ctx.reply(`Ваш Telegram user ID: ${user.id}`);
 });
 
 // Последние сохранённые сообщения
@@ -159,10 +196,70 @@ bot.command("diagnostics", async (ctx) => {
 bot.on("message:text", async (ctx) => {
 	const text = ctx.message.text;
 	const chatId = ctx.chat.id;
+	const user = ctx.from;
+	if (!user) {
+		throw new Error("Telegram user is missing from a text message");
+	}
+	const userId = user.id;
+	const normalized = text.toLocaleLowerCase("ru");
+	const { date: today } = getWarsawDateTime();
+
+	if (/(?:какие|что)\s+(?:у\s+меня\s+)?задач|мои\s+задач/i.test(normalized)) {
+		const targetDate = /\bзавтра\b/i.test(normalized)
+			? shiftDate(today, 1)
+			: today;
+		const tasks = getPendingTasks(chatId, userId, targetDate);
+
+		if (tasks.length === 0) {
+			await ctx.reply(
+				targetDate === today
+					? "На сегодня у тебя нет невыполненных задач. ✅"
+					: "На завтра у тебя пока нет задач.",
+			);
+			return;
+		}
+
+		const heading = targetDate === today ? "Твои задачи на сегодня:" : "Твои задачи на завтра:";
+		await ctx.reply(
+			`${heading}\n${tasks.map((task, index) => `${index + 1}. ${task.text}`).join("\n")}`,
+		);
+		return;
+	}
+
+	if (/\b(добавь|добавить|запиши|создай|поставь)\b/i.test(normalized)) {
+		const dateMatch = normalized.match(/\b(сегодня|завтра)\b/);
+		if (!dateMatch) {
+			await ctx.reply("Уточни, на какой день добавить задачу: сегодня или завтра.");
+			return;
+		}
+
+		let taskText = text
+			.replace(/^\s*@Klepchelka_bot\b[\s,:-]*/i, "")
+			.replace(/^\s*(?:бот[\s,:-]*)?/i, "")
+			.replace(/\b(?:добавь|добавить|запиши|создай|поставь)\b/i, "")
+			.replace(/\b(?:мне|себе)\b/i, "")
+			.replace(/\b(?:на\s+)?(?:сегодня|завтра)\b/i, "")
+			.replace(/\b(?:задачу|задача)\b/i, "")
+			.replace(/\bтакую-то\b/i, "")
+			.replace(/^[\s,:-]+|[\s.!?]+$/g, "")
+			.trim();
+
+		if (!taskText) {
+			await ctx.reply("Напиши, какую именно задачу добавить.");
+			return;
+		}
+
+		const targetDate =
+			dateMatch[1] === "завтра" ? shiftDate(today, 1) : today;
+		addPersonalTask(chatId, userId, targetDate, taskText);
+		await ctx.reply(
+			`Добавил задачу на ${dateMatch[1]}: ${taskText}`,
+		);
+		return;
+	}
 
 	if (/@Klepchelka_bot\s+готово\b/i.test(text)) {
-		const { date } = getWarsawDateTime();
-		const task = getDailyTask(date);
+		const task = getDailyTask(today);
 
 		if (!task || task.chat_id !== chatId) {
 			await ctx.reply("Сегодняшняя задача ещё не отправлена.");
@@ -174,12 +271,54 @@ bot.on("message:text", async (ctx) => {
 			return;
 		}
 
-		if (completeDailyTask(date, chatId, text)) {
+		if (completeDailyTask(today, chatId, text)) {
 			await ctx.reply("Отметил задачу на сегодня как выполненную. ✅");
 			return;
 		}
 
 		await ctx.reply("Не удалось отметить задачу. Попробуйте ещё раз.");
+		return;
+	}
+
+	if (
+		/\b(?:я\s+(?:уже\s+)?(?:сделал[а]?|выполнил[а]?|закончил[а]?|попылесосил[а]?|убрал[а]?|купил[а]?|помыл[а]?|приготовил[а]?|позвонил[а]?|сходил[а]?|почистил[а]?|вынес[ла]?|постирал[а]?|разобрал[а]?)|(?:сделал[а]?|выполнил[а]?|закончил[а]?|попылесосил[а]?|убрал[а]?|готово)|задача выполнена)\b/i.test(
+			normalized,
+		)
+	) {
+		const tasks = getPendingTasks(chatId, userId, today);
+		if (tasks.length === 0) {
+			await ctx.reply("На сегодня у тебя нет невыполненных задач.");
+			return;
+		}
+
+		try {
+			const decision = await matchCompletedTask(text, tasks);
+			if (decision.kind === "none") {
+				await ctx.reply("Не нашёл подходящую задачу на сегодня. Ничего не менял.");
+				return;
+			}
+			if (decision.kind === "ambiguous") {
+				await ctx.reply(
+					`Не уверен, какую задачу отметить. Уточни, пожалуйста:\n${tasks.map((task) => `• ${task.text}`).join("\n")}`,
+				);
+				return;
+			}
+
+			const task = tasks.find((candidate) => candidate.id === decision.taskId);
+			if (
+				task &&
+				completePersonalTask(task.id, chatId, userId, text)
+			) {
+				await ctx.reply(`Отметил выполненной задачу: ${task.text} ✅`);
+				return;
+			}
+
+			await ctx.reply("Задача уже изменена или не найдена. Обнови список задач.");
+		} catch (error) {
+			const message = error instanceof Error ? error.message : String(error);
+			console.error(`[TASK] unable to match completion: ${message}`);
+			await ctx.reply("Не смог надёжно определить задачу и ничего не изменил.");
+		}
 		return;
 	}
 
@@ -222,6 +361,14 @@ bot.start({
 	onStart: (botInfo) => {
 		console.log(`Bot started as @${botInfo.username}`);
 		if (dailyTaskChatId !== undefined) {
+			if (dailyTaskUserId !== undefined) {
+				assignSentDailyTaskToUser(
+					getWarsawDateTime().date,
+					dailyTaskChatId,
+					dailyTaskUserId,
+					DAILY_TASK_TEXT,
+				);
+			}
 			console.log(
 				`[TASK] daily reminder enabled chat=${dailyTaskChatId} time=09:00 ${DAILY_TASK_TIME_ZONE}`,
 			);
