@@ -8,6 +8,13 @@ export type SavedMessage = {
   created_at: string;
 };
 
+export type DailyTask = {
+  task_date: string;
+  chat_id: number;
+  status: "sent" | "completed";
+  completion_text: string | null;
+};
+
 db.exec(`
   CREATE TABLE IF NOT EXISTS messages (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -15,6 +22,16 @@ db.exec(`
     role TEXT NOT NULL,
     text TEXT NOT NULL,
     created_at TEXT NOT NULL
+  );
+
+  CREATE TABLE IF NOT EXISTS daily_tasks (
+    task_date TEXT PRIMARY KEY,
+    chat_id INTEGER NOT NULL,
+    status TEXT NOT NULL CHECK (status IN ('sent', 'completed')),
+    sent_message_id INTEGER NOT NULL,
+    sent_at TEXT NOT NULL,
+    completed_at TEXT,
+    completion_text TEXT
   );
 `);
 
@@ -52,4 +69,51 @@ export function getMessageCount(chatId: number): number {
     .get(chatId) as { count: number };
 
   return result.count;
+}
+
+export function getDailyTask(taskDate: string): DailyTask | undefined {
+  return db
+    .prepare(`
+      SELECT task_date, chat_id, status, completion_text
+      FROM daily_tasks
+      WHERE task_date = ?
+    `)
+    .get(taskDate) as DailyTask | undefined;
+}
+
+export function saveSentDailyTask(
+  taskDate: string,
+  chatId: number,
+  messageId: number,
+): boolean {
+  const result = db.prepare(`
+    INSERT OR IGNORE INTO daily_tasks (
+      task_date,
+      chat_id,
+      status,
+      sent_message_id,
+      sent_at
+    )
+    VALUES (?, ?, 'sent', ?, ?)
+  `).run(taskDate, chatId, messageId, new Date().toISOString());
+
+  return result.changes === 1;
+}
+
+export function completeDailyTask(
+  taskDate: string,
+  chatId: number,
+  completionText: string,
+): boolean {
+  const result = db.prepare(`
+    UPDATE daily_tasks
+    SET status = 'completed',
+        completed_at = ?,
+        completion_text = ?
+    WHERE task_date = ?
+      AND chat_id = ?
+      AND status = 'sent'
+  `).run(new Date().toISOString(), completionText, taskDate, chatId);
+
+  return result.changes === 1;
 }
