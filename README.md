@@ -51,7 +51,7 @@ Telegram-бот на TypeScript и Node.js. Он принимает тексто
 3. В группах приложение обрабатывает только текстовые сообщения, содержащие отдельное слово «бот» (без учета регистра) или точное упоминание `@Klepchelka_bot`. Остальные сообщения игнорируются до обработки задач, сохранения в историю и отправки AI-провайдерам. Telegram доставляет сообщения группы приложению, поскольку Privacy Mode выключен; фильтр действует уже на стороне приложения.
 4. Команда `/start` отправляет приветствие, если в сообщении есть триггер «бот» или упоминание бота. `/memory` показывает до 20 последних сообщений текущего чата. `/diagnostics` показывает uptime, версию Node.js, использование памяти, счетчик сообщений и состояние последнего AI-запроса. В группе добавляйте «бот» к командам, например `/myid бот`.
 5. Сообщения о личных задачах сначала обрабатываются серверной логикой: задачи изолированы по chat ID и Telegram user ID. AI используется только для сопоставления сообщения о выполнении с личными невыполненными задачами; при неоднозначном совпадении состояние не изменяется. Остальные подходящие текстовые сообщения проходят стандартную AI-обработку.
-6. AI prompt содержит системные инструкции, до 8 000 символов истории, до 4 000 символов нового текста и до 12 000 символов текста страницы. Провайдеры пробуются в порядке из `AI_PROVIDER_ORDER`; по умолчанию — `groq,gemini,openrouter,openai,anthropic`. Если все попытки завершаются ошибкой, бот сообщает, что AI-провайдеры недоступны.
+6. AI prompt содержит системные инструкции, до 8 000 символов истории, до 4 000 символов нового текста и до 12 000 символов текста страницы. Провайдеры пробуются в порядке из `AI_PROVIDER_ORDER`; по умолчанию — `groq,gemini,openrouter,cloudflare,openai,anthropic`. У OpenRouter три последовательных варианта модели. Если все попытки завершаются ошибкой, бот сообщает, что AI-провайдеры недоступны.
 7. Успешный ответ сохраняется в SQLite и отправляется пользователю.
 
 Загрузчик URL принимает только `http` и `https`, не следует HTTP-редиректам, ограничивает обычный ответ размером 1 MB и блокирует некоторые localhost/private IPv4-адреса. Для ссылок `chatgpt.com/share/...`, которые не удалось загрузить обычным HTTP-запросом, предусмотрен fallback на Chromium через Playwright. Эта проверка не является полноценным сетевым firewall для исходящих запросов.
@@ -89,17 +89,21 @@ AI-провайдеры (достаточно настроить один или
 | `OPENROUTER_API_KEY` | OpenRouter |
 | `OPENAI_API_KEY` | OpenAI |
 | `ANTHROPIC_API_KEY` | Anthropic |
+| `CLOUDFLARE_API_TOKEN` + `CLOUDFLARE_ACCOUNT_ID` | Cloudflare Workers AI (оба параметра обязательны вместе) |
 
 Опциональные параметры:
 
 | Переменная | Назначение |
 | --- | --- |
-| `AI_PROVIDER_ORDER` | Порядок провайдеров через запятую. Значения: `groq`, `gemini`, `openrouter`, `openai`, `anthropic` |
+| `AI_PROVIDER_ORDER` | Порядок групп провайдеров через запятую. Значения: `groq`, `gemini`, `openrouter`, `cloudflare`, `openai`, `anthropic`; по умолчанию бесплатные варианты идут до платных |
 | `GROQ_MODEL` | Модель Groq; по умолчанию `openai/gpt-oss-120b` |
 | `GEMINI_MODEL` | Модель Gemini; по умолчанию `gemini-3.6-flash` |
 | `OPENROUTER_MODEL` | Модель OpenRouter; по умолчанию `google/gemma-4-26b-a4b-it:free` |
+| `OPENROUTER_DOTS_MODEL` | Вариант Dots в OpenRouter; по умолчанию `dots-studio/dots-3-note-preview:free` |
+| `OPENROUTER_LING_MODEL` | Вариант Ling в OpenRouter; по умолчанию `inclusionai/ling-3.0-flash-sante:free` |
 | `OPENAI_MODEL` | Модель OpenAI; по умолчанию `gpt-4o-mini` |
-| `ANTHROPIC_MODEL` | Модель Anthropic; по умолчанию `claude-3-5-haiku-latest` |
+| `ANTHROPIC_MODEL` | Модель Anthropic; по умолчанию `claude-haiku-5-5` |
+| `CLOUDFLARE_MODEL` | Модель Workers AI; по умолчанию `@cf/qwen/qwen3-30b-a3b-fp8` |
 | `BROWSER_HEADLESS` | Если установить в `false`, Playwright запустит браузер не в headless-режиме; по умолчанию headless |
 
 Пример `.env` с фиктивными значениями:
@@ -109,10 +113,18 @@ BOT_TOKEN=replace-with-telegram-token
 ALLOWED_CHAT_IDS=123456789,987654321
 GROQ_API_KEY=replace-with-groq-key
 GEMINI_API_KEY=replace-with-gemini-key
-AI_PROVIDER_ORDER=groq,gemini,openrouter,openai,anthropic
+OPENROUTER_API_KEY=replace-with-openrouter-key
+AI_PROVIDER_ORDER=groq,gemini,openrouter,cloudflare,openai,anthropic
 ```
 
 Не задавайте API-ключи, которыми не располагаете: незаданные провайдеры не будут включены.
+
+OpenRouter последовательно пробует основную модель, бесплатную Dots3-Note Preview и бесплатную Ling 3.0 Flash Sante. У бесплатных моделей OpenRouter общий лимит аккаунта/провайдера (на дату проверки — 20 запросов в минуту и 50 в день для аккаунтов без купленных кредитов); наличие `:free` в каталоге не гарантирует постоянную доступность или отсутствие 429. Ling Sante — модель специализированной медицинской тематики, поэтому оставлена последним вариантом OpenRouter, а не основным семейным ассистентом. Подробности — в [правилах бесплатных моделей](https://openrouter.ai/docs/guides/routing/model-variants/free) и [лимитах API](https://openrouter.ai/docs/api_reference/limits).
+При ручном переопределении `OPENROUTER_MODEL`, `OPENROUTER_DOTS_MODEL` или `OPENROUTER_LING_MODEL` убедитесь, что выбранная модель действительно имеет бесплатный вариант; иначе запросы могут тарифицироваться.
+
+Cloudflare Workers AI включается только при наличии обоих параметров `CLOUDFLARE_API_TOKEN` и `CLOUDFLARE_ACCOUNT_ID`. Текущая документация описывает бесплатную квоту 10 000 Neurons в день; исчерпание квоты на Free plan приводит к отказу, а не к автоматическому платному продолжению. По умолчанию используется [Qwen3 30B A3B](https://developers.cloudflare.com/workers-ai/models/qwen3-30b-a3b-fp8/), который совместим с Chat Completions API через [OpenAI-совместимую точку входа](https://developers.cloudflare.com/workers-ai/configuration/open-ai-compatibility/). У отдельных моделей, включая GLM-5.3-Flash, требуется оплачиваемый план/способ оплаты. См. [тарифы и дневную квоту](https://developers.cloudflare.com/workers-ai/platform/pricing/).
+
+GLM-5.3-Flash через OpenRouter в каталоге на 8 октября 2026 г. не имеет бесплатной `:free` версии, поэтому он не включен в бесплатные fallback-модели. Платные OpenAI и Anthropic остаются в цепочке после бесплатных провайдеров, но начнут успешно отвечать и тарифицироваться, если на их аккаунтах появится баланс/кредиты.
 
 ## Ежедневная задача
 

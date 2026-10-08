@@ -2,10 +2,19 @@ import Anthropic from "@anthropic-ai/sdk";
 import OpenAI from "openai";
 import type { PersonalTask, SavedMessage } from "./database.js";
 
-type ProviderName = "gemini" | "groq" | "openrouter" | "openai" | "anthropic";
+type ProviderName =
+  | "gemini"
+  | "groq"
+  | "openrouter"
+  | "openrouter-dots"
+  | "openrouter-ling"
+  | "openai"
+  | "anthropic"
+  | "cloudflare";
 
 type Provider = {
   name: ProviderName;
+  orderGroup: string;
   generate: (prompt: string) => Promise<string>;
 };
 
@@ -34,6 +43,14 @@ const groqKey = process.env.GROQ_API_KEY;
 const openRouterKey = process.env.OPENROUTER_API_KEY;
 const openaiKey = process.env.OPENAI_API_KEY;
 const anthropicKey = process.env.ANTHROPIC_API_KEY;
+const cloudflareToken = process.env.CLOUDFLARE_API_TOKEN;
+const cloudflareAccountId = process.env.CLOUDFLARE_ACCOUNT_ID;
+
+if (Boolean(cloudflareToken) !== Boolean(cloudflareAccountId)) {
+  throw new Error(
+    "CLOUDFLARE_API_TOKEN and CLOUDFLARE_ACCOUNT_ID must both be set",
+  );
+}
 
 const providers: Provider[] = [];
 let lastRequest: LastRequestDiagnostics | undefined;
@@ -44,6 +61,7 @@ const MAX_URL_CONTEXT_CHARS = 12_000;
 if (geminiKey) {
   providers.push({
     name: "gemini",
+    orderGroup: "gemini",
     generate: async (prompt) => {
       const model = process.env.GEMINI_MODEL ?? "gemini-3.6-flash";
       const response = await fetch(
@@ -82,7 +100,8 @@ if (geminiKey) {
 }
 
 function addOpenAICompatibleProvider(
-  name: "groq" | "openrouter" | "openai",
+  name: Exclude<ProviderName, "gemini" | "anthropic">,
+  orderGroup: string,
   apiKey: string,
   baseURL: string | undefined,
   model: string,
@@ -91,19 +110,26 @@ function addOpenAICompatibleProvider(
   const client = new OpenAI({ apiKey, baseURL, defaultHeaders });
   providers.push({
     name,
+    orderGroup,
     generate: async (prompt) => {
       const response = await client.chat.completions.create({
         model,
         messages: [{ role: "user", content: prompt }],
       });
 
-      return response.choices[0]?.message.content ?? `Не удалось получить ответ от ${name}.`;
+      const answer = response.choices[0]?.message.content;
+      if (typeof answer !== "string" || answer.trim().length === 0) {
+        throw new Error(`${name} returned an empty response`);
+      }
+
+      return answer.trim();
     },
   });
 }
 
 if (groqKey) {
   addOpenAICompatibleProvider(
+    "groq",
     "groq",
     groqKey,
     "https://api.groq.com/openai/v1",
@@ -112,20 +138,43 @@ if (groqKey) {
 }
 
 if (openRouterKey) {
+  const openRouterHeaders = {
+    "HTTP-Referer": "https://github.com/Klepchelka_bot",
+    "X-OpenRouter-Title": "Klepchelka Bot",
+  };
+  const openRouterUrl = "https://openrouter.ai/api/v1";
+
   addOpenAICompatibleProvider(
     "openrouter",
+    "openrouter",
     openRouterKey,
-    "https://openrouter.ai/api/v1",
+    openRouterUrl,
     process.env.OPENROUTER_MODEL ?? "google/gemma-4-26b-a4b-it:free",
-    {
-      "HTTP-Referer": "https://github.com/Klepchelka_bot",
-      "X-OpenRouter-Title": "Klepchelka Bot",
-    },
+    openRouterHeaders,
+  );
+  addOpenAICompatibleProvider(
+    "openrouter-dots",
+    "openrouter",
+    openRouterKey,
+    openRouterUrl,
+    process.env.OPENROUTER_DOTS_MODEL ??
+      "dots-studio/dots-3-note-preview:free",
+    openRouterHeaders,
+  );
+  addOpenAICompatibleProvider(
+    "openrouter-ling",
+    "openrouter",
+    openRouterKey,
+    openRouterUrl,
+    process.env.OPENROUTER_LING_MODEL ??
+      "inclusionai/ling-3.0-flash-sante:free",
+    openRouterHeaders,
   );
 }
 
 if (openaiKey) {
   addOpenAICompatibleProvider(
+    "openai",
     "openai",
     openaiKey,
     undefined,
@@ -137,27 +186,61 @@ if (anthropicKey) {
   const anthropic = new Anthropic({ apiKey: anthropicKey });
   providers.push({
     name: "anthropic",
+    orderGroup: "anthropic",
     generate: async (prompt) => {
       const response = await anthropic.messages.create({
-        model: process.env.ANTHROPIC_MODEL ?? "claude-3-5-haiku-latest",
+        model: process.env.ANTHROPIC_MODEL ?? "claude-haiku-5-5",
         max_tokens: 1000,
         messages: [{ role: "user", content: prompt }],
       });
 
       const text = response.content.find((block) => block.type === "text");
-      return text?.type === "text" ? text.text : "Не удалось получить ответ от Claude.";
+      if (!text || text.text.trim().length === 0) {
+        throw new Error("Anthropic returned an empty response");
+      }
+
+      return text.text.trim();
     },
   });
 }
 
+if (cloudflareToken && cloudflareAccountId) {
+  addOpenAICompatibleProvider(
+    "cloudflare",
+    "cloudflare",
+    cloudflareToken,
+    `https://api.cloudflare.com/client/v4/accounts/${encodeURIComponent(cloudflareAccountId)}/ai/v1`,
+    process.env.CLOUDFLARE_MODEL ?? "@cf/qwen/qwen3-30b-a3b-fp8",
+  );
+}
+
 const providerOrder = (
   process.env.AI_PROVIDER_ORDER ??
-  "groq,gemini,openrouter,openai,anthropic"
-).split(",");
+  "groq,gemini,openrouter,cloudflare,openai,anthropic"
+)
+  .split(",")
+  .map((name) => name.trim())
+  .filter(Boolean);
+
+if (!providerOrder.includes("cloudflare")) {
+  const firstPaidProvider = providerOrder.findIndex(
+    (name) => name === "openai" || name === "anthropic",
+  );
+  providerOrder.splice(
+    firstPaidProvider < 0 ? providerOrder.length : firstPaidProvider,
+    0,
+    "cloudflare",
+  );
+}
 
 providers.sort(
   (left, right) =>
-    providerOrder.indexOf(left.name) - providerOrder.indexOf(right.name),
+    (providerOrder.indexOf(left.orderGroup) < 0
+      ? Number.MAX_SAFE_INTEGER
+      : providerOrder.indexOf(left.orderGroup)) -
+    (providerOrder.indexOf(right.orderGroup) < 0
+      ? Number.MAX_SAFE_INTEGER
+      : providerOrder.indexOf(right.orderGroup)),
 );
 
 function buildPrompt(
