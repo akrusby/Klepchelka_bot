@@ -27,6 +27,13 @@ export type PersonalTask = {
   status: "pending" | "completed";
 };
 
+export type Reminder = {
+  id: number;
+  chat_id: number;
+  text: string;
+  due_at: string;
+};
+
 db.exec(`
   CREATE TABLE IF NOT EXISTS messages (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -61,6 +68,20 @@ db.exec(`
   CREATE INDEX IF NOT EXISTS personal_tasks_owner_date_status
   ON personal_tasks (chat_id, user_id, task_date, status);
 
+  CREATE TABLE IF NOT EXISTS reminders (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    chat_id INTEGER NOT NULL,
+    user_id INTEGER NOT NULL,
+    text TEXT NOT NULL,
+    due_at TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    sent_at TEXT
+  );
+
+  CREATE INDEX IF NOT EXISTS reminders_pending_due
+  ON reminders (due_at)
+  WHERE sent_at IS NULL;
+
   CREATE TABLE IF NOT EXISTS household_assignments (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     cycle_start TEXT NOT NULL,
@@ -89,6 +110,74 @@ db.exec(`
     PRIMARY KEY (task_date, chat_id)
   );
 `);
+
+export function addReminder(
+  chatId: number,
+  userId: number,
+  text: string,
+  dueAt: Date,
+): number {
+  const result = db.prepare(`
+    INSERT INTO reminders (chat_id, user_id, text, due_at, created_at)
+    VALUES (?, ?, ?, ?, ?)
+  `).run(
+    chatId,
+    userId,
+    text,
+    dueAt.toISOString(),
+    new Date().toISOString(),
+  );
+
+  return Number(result.lastInsertRowid);
+}
+
+export function getDueReminders(now: Date, limit = 20): Reminder[] {
+  return db.prepare(`
+    SELECT id, chat_id, text, due_at
+    FROM reminders
+    WHERE sent_at IS NULL AND due_at <= ?
+    ORDER BY due_at, id
+    LIMIT ?
+  `).all(now.toISOString(), limit) as Reminder[];
+}
+
+export function getLatestPendingReminder(
+  chatId: number,
+  userId: number,
+): Reminder | undefined {
+  return db.prepare(`
+    SELECT id, chat_id, text, due_at
+    FROM reminders
+    WHERE chat_id = ? AND user_id = ? AND sent_at IS NULL
+    ORDER BY created_at DESC, id DESC
+    LIMIT 1
+  `).get(chatId, userId) as Reminder | undefined;
+}
+
+export function rescheduleReminder(
+  reminderId: number,
+  chatId: number,
+  userId: number,
+  dueAt: Date,
+): boolean {
+  const result = db.prepare(`
+    UPDATE reminders
+    SET due_at = ?
+    WHERE id = ? AND chat_id = ? AND user_id = ? AND sent_at IS NULL
+  `).run(dueAt.toISOString(), reminderId, chatId, userId);
+
+  return result.changes === 1;
+}
+
+export function markReminderSent(reminderId: number): boolean {
+  const result = db.prepare(`
+    UPDATE reminders
+    SET sent_at = ?
+    WHERE id = ? AND sent_at IS NULL
+  `).run(new Date().toISOString(), reminderId);
+
+  return result.changes === 1;
+}
 
 export function saveMessage(
   chatId: number,

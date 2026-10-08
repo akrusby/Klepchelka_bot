@@ -4,13 +4,18 @@ import { generateAnswer, getAiDiagnostics, matchCompletedTask } from "./ai.js";
 import {
 	addPersonalTask,
 	completePersonalTask,
+	addReminder,
 	ensureHouseholdWeeklySchedule,
+	getDueReminders,
 	getHouseholdAssignments,
 	getHouseholdCycleStartDate,
+	getLatestPendingReminder,
 	hasHouseholdDailyNotification,
 	getMessageCount,
 	getPendingTasks,
 	getRecentMessages,
+	markReminderSent,
+	rescheduleReminder,
 	saveHouseholdDailyNotification,
 	saveMessage,
 } from "./database.js";
@@ -53,6 +58,81 @@ function containsBotTrigger(text: string): boolean {
 	return BOT_TRIGGER_PATTERN.test(text);
 }
 
+type ParsedReminder = {
+	dueAt: Date;
+	text: string;
+};
+
+const REMINDER_TIME_PATTERN =
+	/\bчерез\s+(?:(\d+|один|одна|одно|одну|два|две|три|четыре|пять|шесть|семь|восемь|девять|десять)\s*)?(секунд(?:а|ы|у)?|минут(?:а|ы|у)?|час(?:а|ов)?|д(?:ень|ня|ней))\b/iu;
+const REMINDER_NUMBERS: Record<string, number> = {
+	один: 1,
+	одна: 1,
+	одно: 1,
+	одну: 1,
+	два: 2,
+	две: 2,
+	три: 3,
+	четыре: 4,
+	пять: 5,
+	шесть: 6,
+	семь: 7,
+	восемь: 8,
+	девять: 9,
+	десять: 10,
+};
+
+function parseReminder(text: string): ParsedReminder | undefined {
+	const command = /\bнапомни(?:ть)?\b/iu.exec(text);
+	if (!command || command.index === undefined) {
+		return undefined;
+	}
+
+	const commandEnd = command.index + command[0].length;
+	const remainder = text.slice(commandEnd);
+	const nowMatch = /\bсейчас\b/iu.exec(remainder);
+	const timeMatch = nowMatch ?? REMINDER_TIME_PATTERN.exec(remainder);
+	if (!timeMatch || timeMatch.index === undefined) {
+		return undefined;
+	}
+
+	let delayMs = 0;
+	if (timeMatch !== nowMatch) {
+		const quantity = timeMatch[1] ?? "1";
+		const amount = Number(quantity) || REMINDER_NUMBERS[quantity.toLocaleLowerCase("ru")];
+		const unit = timeMatch[2].toLocaleLowerCase("ru");
+		const unitMs = unit.startsWith("секунд")
+			? 1_000
+			: unit.startsWith("минут")
+				? 60_000
+				: unit.startsWith("час")
+					? 3_600_000
+					: 86_400_000;
+		delayMs = amount * unitMs;
+		if (!Number.isFinite(delayMs) || delayMs > 365 * 86_400_000) {
+			return undefined;
+		}
+	}
+
+	const beforeTime = remainder
+		.slice(0, timeMatch.index)
+		.replace(/^\s*(?:мне|себе)\b/iu, " ")
+		.replace(/[\s,:;-]+$/g, "");
+	const afterTime = remainder
+		.slice(timeMatch.index + timeMatch[0].length)
+		.replace(/^\s*(?:чтобы|чтоб|что)\b/iu, " ")
+		.replace(/^[\s,:;-]+/g, "");
+	const reminderText = `${beforeTime} ${afterTime}`
+		.replace(/^[\s,:;-]+|[\s.!?]+$/g, "")
+		.replace(/\s+/g, " ")
+		.trim();
+
+	return {
+		dueAt: new Date(Date.now() + delayMs),
+		text: reminderText,
+	};
+}
+
 function getWarsawDateTime(): { date: string; hour: number; minute: number } {
 	const parts = new Intl.DateTimeFormat("en-GB", {
 		timeZone: DAILY_TASK_TIME_ZONE,
@@ -79,6 +159,7 @@ function shiftDate(date: string, days: number): string {
 }
 
 let sendingHouseholdTasks = false;
+let sendingReminders = false;
 
 async function sendHouseholdTasksIfDue(): Promise<void> {
 	if (householdTaskChatId === undefined || sendingHouseholdTasks) {
@@ -121,6 +202,45 @@ async function sendHouseholdTasksIfDue(): Promise<void> {
 		console.error(`[TASK] unable to send household task list date=${date}: ${message}`);
 	} finally {
 		sendingHouseholdTasks = false;
+	}
+}
+
+async function sendDueReminders(): Promise<void> {
+	if (sendingReminders) {
+		return;
+	}
+
+	sendingReminders = true;
+	try {
+		for (const reminder of getDueReminders(new Date())) {
+			try {
+				const prefix = "⏰ Напоминание: ";
+				const entities = [
+					...reminder.text.matchAll(/(^|[^\p{L}\p{N}_])(@[A-Za-z][A-Za-z0-9_]{4,31})/gu),
+				].map((match) => ({
+					type: "mention" as const,
+					offset: prefix.length + (match.index ?? 0) + match[1].length,
+					length: match[2].length,
+				}));
+				await bot.api.sendMessage(
+					reminder.chat_id,
+					`${prefix}${reminder.text}`,
+					{ entities },
+				);
+				if (!markReminderSent(reminder.id)) {
+					console.error(
+						`[REMINDER] unable to mark reminder sent id=${reminder.id}`,
+					);
+				}
+			} catch (error) {
+				const message = error instanceof Error ? error.message : String(error);
+				console.error(
+					`[REMINDER] unable to send reminder id=${reminder.id}: ${message}`,
+				);
+			}
+		}
+	} finally {
+		sendingReminders = false;
 	}
 }
 
@@ -238,6 +358,49 @@ bot.on("message:text", async (ctx) => {
 	console.log(
 		`[UPDATE] text received update=${ctx.update.update_id} message=${ctx.message.message_id} chat=${chatId} user=${userId} entities=${entities}`,
 	);
+
+	if (/\bнапомни(?:ть)?\b/iu.test(text)) {
+		const reminder = parseReminder(text);
+		if (!reminder) {
+			await ctx.reply(
+				"Укажи время напоминания: например, «через час» или «сейчас». Максимум — год.",
+			);
+			return;
+		}
+		let reminderText = reminder.text;
+		if (!reminderText) {
+			const previousReminder = getLatestPendingReminder(chatId, userId);
+			if (!previousReminder) {
+				await ctx.reply(
+					"Напиши, о чём напомнить. Например: «Бот, напомни через час купить хлеб».",
+				);
+				return;
+			}
+			if (
+				!rescheduleReminder(
+					previousReminder.id,
+					chatId,
+					userId,
+					reminder.dueAt,
+				)
+			) {
+				await ctx.reply("Не удалось обновить напоминание. Попробуй ещё раз.");
+				return;
+			}
+			reminderText = previousReminder.text;
+		} else {
+			addReminder(chatId, userId, reminderText, reminder.dueAt);
+		}
+		await ctx.reply(
+			reminder.dueAt.getTime() <= Date.now()
+				? `Хорошо, напомню сейчас: ${reminderText}`
+				: `Хорошо, напомню ${reminder.dueAt.toLocaleString("ru-RU", { timeZone: DAILY_TASK_TIME_ZONE })}: ${reminderText}`,
+		);
+		if (reminder.dueAt.getTime() <= Date.now()) {
+			void sendDueReminders();
+		}
+		return;
+	}
 
 	if (/(?:какие|что)\s+(?:у\s+меня\s+)?задач|мои\s+задач/i.test(normalized)) {
 		const targetDate = /\bзавтра\b/i.test(normalized)
@@ -373,6 +536,8 @@ console.log("Bot is starting...");
 bot.start({
 	onStart: (botInfo) => {
 		console.log(`Bot started as @${botInfo.username}`);
+			void sendDueReminders();
+			setInterval(() => void sendDueReminders(), 15_000);
 			if (householdTaskChatId !== undefined) {
 				console.log(
 					`[TASK] household rotation enabled chat=${householdTaskChatId} time=09:00 ${DAILY_TASK_TIME_ZONE}`,
