@@ -203,6 +203,12 @@ bot.on("message:text", async (ctx) => {
 	const userId = user.id;
 	const normalized = text.toLocaleLowerCase("ru");
 	const { date: today } = getWarsawDateTime();
+	const entities = ctx.message.entities
+		?.map((entity) => `${entity.type}:${entity.offset}+${entity.length}`)
+		.join(",") ?? "none";
+	console.log(
+		`[UPDATE] text received update=${ctx.update.update_id} message=${ctx.message.message_id} chat=${chatId} user=${userId} entities=${entities}`,
+	);
 
 	if (/(?:какие|что)\s+(?:у\s+меня\s+)?задач|мои\s+задач/i.test(normalized)) {
 		const targetDate = /\bзавтра\b/i.test(normalized)
