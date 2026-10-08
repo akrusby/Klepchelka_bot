@@ -20,6 +20,7 @@ import {
 	saveMessage,
 } from "./database.js";
 import { HOUSEHOLD_MEMBERS } from "./household-schedule.js";
+import { parseReminder } from "./reminders.js";
 import { loadUrlContext } from "./url-loader.js";
 
 const token = process.env.BOT_TOKEN;
@@ -56,81 +57,6 @@ const BOT_TRIGGER_PATTERN =
 
 function containsBotTrigger(text: string): boolean {
 	return BOT_TRIGGER_PATTERN.test(text);
-}
-
-type ParsedReminder = {
-	dueAt: Date;
-	text: string;
-};
-
-const REMINDER_TIME_PATTERN =
-	/\bчерез\s+(?:(\d+|один|одна|одно|одну|два|две|три|четыре|пять|шесть|семь|восемь|девять|десять)\s*)?(секунд(?:а|ы|у)?|минут(?:а|ы|у)?|час(?:а|ов)?|д(?:ень|ня|ней))\b/iu;
-const REMINDER_NUMBERS: Record<string, number> = {
-	один: 1,
-	одна: 1,
-	одно: 1,
-	одну: 1,
-	два: 2,
-	две: 2,
-	три: 3,
-	четыре: 4,
-	пять: 5,
-	шесть: 6,
-	семь: 7,
-	восемь: 8,
-	девять: 9,
-	десять: 10,
-};
-
-function parseReminder(text: string): ParsedReminder | undefined {
-	const command = /\bнапомни(?:ть)?\b/iu.exec(text);
-	if (!command || command.index === undefined) {
-		return undefined;
-	}
-
-	const commandEnd = command.index + command[0].length;
-	const remainder = text.slice(commandEnd);
-	const nowMatch = /\bсейчас\b/iu.exec(remainder);
-	const timeMatch = nowMatch ?? REMINDER_TIME_PATTERN.exec(remainder);
-	if (!timeMatch || timeMatch.index === undefined) {
-		return undefined;
-	}
-
-	let delayMs = 0;
-	if (timeMatch !== nowMatch) {
-		const quantity = timeMatch[1] ?? "1";
-		const amount = Number(quantity) || REMINDER_NUMBERS[quantity.toLocaleLowerCase("ru")];
-		const unit = timeMatch[2].toLocaleLowerCase("ru");
-		const unitMs = unit.startsWith("секунд")
-			? 1_000
-			: unit.startsWith("минут")
-				? 60_000
-				: unit.startsWith("час")
-					? 3_600_000
-					: 86_400_000;
-		delayMs = amount * unitMs;
-		if (!Number.isFinite(delayMs) || delayMs > 365 * 86_400_000) {
-			return undefined;
-		}
-	}
-
-	const beforeTime = remainder
-		.slice(0, timeMatch.index)
-		.replace(/^\s*(?:мне|себе)\b/iu, " ")
-		.replace(/[\s,:;-]+$/g, "");
-	const afterTime = remainder
-		.slice(timeMatch.index + timeMatch[0].length)
-		.replace(/^\s*(?:чтобы|чтоб|что)\b/iu, " ")
-		.replace(/^[\s,:;-]+/g, "");
-	const reminderText = `${beforeTime} ${afterTime}`
-		.replace(/^[\s,:;-]+|[\s.!?]+$/g, "")
-		.replace(/\s+/g, " ")
-		.trim();
-
-	return {
-		dueAt: new Date(Date.now() + delayMs),
-		text: reminderText,
-	};
 }
 
 function getWarsawDateTime(): { date: string; hour: number; minute: number } {
@@ -359,7 +285,7 @@ bot.on("message:text", async (ctx) => {
 		`[UPDATE] text received update=${ctx.update.update_id} message=${ctx.message.message_id} chat=${chatId} user=${userId} entities=${entities}`,
 	);
 
-	if (/\bнапомни(?:ть)?\b/iu.test(text)) {
+	if (/(?<![\p{L}\p{N}_])напомни(?:ть)?(?![\p{L}\p{N}_])/iu.test(text)) {
 		const reminder = parseReminder(text);
 		if (!reminder) {
 			await ctx.reply(
