@@ -55,6 +55,12 @@ if (
 const bot = new Bot(token);
 const DAILY_TASK_TEXT = "Андрей, попылесось на кухне";
 const DAILY_TASK_TIME_ZONE = "Europe/Warsaw";
+const BOT_TRIGGER_PATTERN =
+	/(^|[^\p{L}\p{N}_])бот(?=$|[^\p{L}\p{N}_])|@Klepchelka_bot\b/iu;
+
+function containsBotTrigger(text: string): boolean {
+	return BOT_TRIGGER_PATTERN.test(text);
+}
 
 function getWarsawDateTime(): { date: string; hour: number; minute: number } {
 	const parts = new Intl.DateTimeFormat("en-GB", {
@@ -130,10 +136,30 @@ bot.use(async (ctx, next) => {
 	await next();
 });
 
+bot.use(async (ctx, next) => {
+	const chat = ctx.chat;
+	const message = ctx.message;
+	if (
+		chat &&
+		(chat.type === "group" || chat.type === "supergroup") &&
+		message &&
+		"text" in message &&
+		typeof message.text === "string" &&
+		!containsBotTrigger(message.text)
+	) {
+		console.log(
+			`[FILTER] ignored group message update=${ctx.update.update_id} message=${message.message_id} chat=${chat.id}`,
+		);
+		return;
+	}
+
+	await next();
+});
+
 // /start
 bot.command("start", async (ctx) => {
 	await ctx.reply(
-		"Привет! Я работаю 🤖\n\nМожешь отправлять мне сообщения или отмечать выполнение задачи командой @Klepchelka_bot готово."
+		"Привет! Я работаю 🤖\n\nВ группе обращайся ко мне со словом «бот» или упоминай @Klepchelka_bot. Например: «Бот, какие у меня задачи на сегодня?»"
 	);
 });
 
@@ -264,7 +290,7 @@ bot.on("message:text", async (ctx) => {
 		return;
 	}
 
-	if (/@Klepchelka_bot\s+готово\b/i.test(text)) {
+	if (containsBotTrigger(text) && /готово/iu.test(text)) {
 		const task = getDailyTask(today);
 
 		if (!task || task.chat_id !== chatId) {
