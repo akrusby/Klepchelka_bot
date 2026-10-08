@@ -3,24 +3,23 @@ import { Bot } from "grammy";
 import { generateAnswer, getAiDiagnostics, matchCompletedTask } from "./ai.js";
 import {
 	addPersonalTask,
-	assignSentDailyTaskToUser,
-	completeDailyTask,
 	completePersonalTask,
-	getDailyTask,
+	ensureHouseholdWeeklySchedule,
+	getHouseholdAssignments,
+	getHouseholdCycleStartDate,
+	hasHouseholdDailyNotification,
 	getMessageCount,
 	getPendingTasks,
 	getRecentMessages,
+	saveHouseholdDailyNotification,
 	saveMessage,
-	saveSentDailyTask,
 } from "./database.js";
+import { HOUSEHOLD_MEMBERS } from "./household-schedule.js";
 import { loadUrlContext } from "./url-loader.js";
 
 const token = process.env.BOT_TOKEN;
-const dailyTaskChatId = process.env.DAILY_TASK_CHAT_ID
+const householdTaskChatId = process.env.DAILY_TASK_CHAT_ID
 	? Number(process.env.DAILY_TASK_CHAT_ID)
-	: undefined;
-const dailyTaskUserId = process.env.DAILY_TASK_USER_ID
-	? Number(process.env.DAILY_TASK_USER_ID)
 	: undefined;
 const allowedChatIds = (
 	process.env.ALLOWED_CHAT_IDS ?? process.env.ALLOWED_CHAT_ID ?? ""
@@ -38,22 +37,14 @@ if (allowedChatIds.length === 0) {
 }
 
 if (
-	dailyTaskChatId !== undefined &&
-	(!Number.isSafeInteger(dailyTaskChatId) ||
-		!allowedChatIds.includes(dailyTaskChatId))
+	householdTaskChatId !== undefined &&
+	(!Number.isSafeInteger(householdTaskChatId) ||
+		!allowedChatIds.includes(householdTaskChatId))
 ) {
 	throw new Error("DAILY_TASK_CHAT_ID must be an integer in ALLOWED_CHAT_IDS");
 }
 
-if (
-	dailyTaskUserId !== undefined &&
-	(!Number.isSafeInteger(dailyTaskUserId) || dailyTaskUserId <= 0)
-) {
-	throw new Error("DAILY_TASK_USER_ID must be a positive Telegram user ID");
-}
-
 const bot = new Bot(token);
-const DAILY_TASK_TEXT = "Андрей, попылесось на кухне";
 const DAILY_TASK_TIME_ZONE = "Europe/Warsaw";
 const BOT_TRIGGER_PATTERN =
 	/(^|[^\p{L}\p{N}_])(?:бот|елебот|еле-елебот|балабот|ботан)(?=$|[^\p{L}\p{N}_])|@Klepchelka_bot\b/iu;
@@ -87,37 +78,49 @@ function shiftDate(date: string, days: number): string {
 	return shifted.toISOString().slice(0, 10);
 }
 
-let sendingDailyTask = false;
+let sendingHouseholdTasks = false;
 
-async function sendDailyTaskIfDue(): Promise<void> {
-	if (dailyTaskChatId === undefined || sendingDailyTask) {
+async function sendHouseholdTasksIfDue(): Promise<void> {
+	if (householdTaskChatId === undefined || sendingHouseholdTasks) {
 		return;
 	}
 
 	const { date, hour, minute } = getWarsawDateTime();
-	if (hour !== 9 || minute > 5 || getDailyTask(date)) {
+	if (
+		hour !== 9 ||
+		minute > 5 ||
+		hasHouseholdDailyNotification(date, householdTaskChatId)
+	) {
 		return;
 	}
 
-	sendingDailyTask = true;
+	sendingHouseholdTasks = true;
 	try {
-		const message = await bot.api.sendMessage(dailyTaskChatId, DAILY_TASK_TEXT);
-		if (
-			!saveSentDailyTask(
-				date,
-				dailyTaskChatId,
-				message.message_id,
-				dailyTaskUserId,
-				DAILY_TASK_TEXT,
-			)
-		) {
-			console.error(`[TASK] daily task already recorded date=${date}`);
+		const cycleStart = getHouseholdCycleStartDate(date);
+		ensureHouseholdWeeklySchedule(cycleStart, householdTaskChatId);
+		const assignments = getHouseholdAssignments(date, householdTaskChatId);
+		if (assignments.length === 0) {
+			throw new Error(`No household assignments generated for date=${date}`);
+		}
+
+		const sections = HOUSEHOLD_MEMBERS.map((member) => {
+			const chores = assignments
+				.filter((assignment) => assignment.member_name === member)
+				.map((assignment) => `• ${assignment.chore_text}`);
+			return `${member}\n${chores.length > 0 ? chores.join("\n") : "• Сегодня выходной"}`;
+		});
+		const message = await bot.api.sendMessage(
+			householdTaskChatId,
+			`Домашние задачи на сегодня (${date})\n\n${sections.join("\n\n")}`,
+		);
+		if (!saveHouseholdDailyNotification(date, householdTaskChatId, message.message_id)) {
+			console.error(`[TASK] household task list already recorded date=${date}`);
 		}
 	} catch (error) {
 		const message = error instanceof Error ? error.message : String(error);
-		console.error(`[TASK] unable to send daily task date=${date}: ${message}`);
+		console.error(`[TASK] unable to send household task list date=${date}: ${message}`);
 	} finally {
-		sendingDailyTask = false;
+		sendingHouseholdTasks = false;
 	}
 }
 
@@ -290,28 +293,6 @@ bot.on("message:text", async (ctx) => {
 		return;
 	}
 
-	if (containsBotTrigger(text) && /готово/iu.test(text)) {
-		const task = getDailyTask(today);
-
-		if (!task || task.chat_id !== chatId) {
-			await ctx.reply("Сегодняшняя задача ещё не отправлена.");
-			return;
-		}
-
-		if (task.status === "completed") {
-			await ctx.reply("Задача на сегодня уже отмечена как выполненная. ✅");
-			return;
-		}
-
-		if (completeDailyTask(today, chatId, text)) {
-			await ctx.reply("Отметил задачу на сегодня как выполненную. ✅");
-			return;
-		}
-
-		await ctx.reply("Не удалось отметить задачу. Попробуйте ещё раз.");
-		return;
-	}
-
 	if (
 		/\b(?:я\s+(?:уже\s+)?(?:сделал[а]?|выполнил[а]?|закончил[а]?|попылесосил[а]?|убрал[а]?|купил[а]?|помыл[а]?|приготовил[а]?|позвонил[а]?|сходил[а]?|почистил[а]?|вынес[ла]?|постирал[а]?|разобрал[а]?)|(?:сделал[а]?|выполнил[а]?|закончил[а]?|попылесосил[а]?|убрал[а]?|готово)|задача выполнена)\b/i.test(
 			normalized,
@@ -392,22 +373,14 @@ console.log("Bot is starting...");
 bot.start({
 	onStart: (botInfo) => {
 		console.log(`Bot started as @${botInfo.username}`);
-		if (dailyTaskChatId !== undefined) {
-			if (dailyTaskUserId !== undefined) {
-				assignSentDailyTaskToUser(
-					getWarsawDateTime().date,
-					dailyTaskChatId,
-					dailyTaskUserId,
-					DAILY_TASK_TEXT,
+			if (householdTaskChatId !== undefined) {
+				console.log(
+					`[TASK] household rotation enabled chat=${householdTaskChatId} time=09:00 ${DAILY_TASK_TIME_ZONE}`,
 				);
+				void sendHouseholdTasksIfDue();
+				setInterval(() => void sendHouseholdTasksIfDue(), 15_000);
+			} else {
+				console.log("[TASK] household rotation disabled: DAILY_TASK_CHAT_ID is not set");
 			}
-			console.log(
-				`[TASK] daily reminder enabled chat=${dailyTaskChatId} time=09:00 ${DAILY_TASK_TIME_ZONE}`,
-			);
-			void sendDailyTaskIfDue();
-			setInterval(() => void sendDailyTaskIfDue(), 15_000);
-		} else {
-			console.log("[TASK] daily reminder disabled: DAILY_TASK_CHAT_ID is not set");
-		}
 	},
 });

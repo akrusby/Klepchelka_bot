@@ -1,4 +1,9 @@
 import Database from "better-sqlite3";
+import {
+	generateHouseholdWeek,
+	type HouseholdAssignment,
+	type HouseholdMember,
+} from "./household-schedule.js";
 
 const db = new Database("klepchelka.db");
 
@@ -55,6 +60,34 @@ db.exec(`
 
   CREATE INDEX IF NOT EXISTS personal_tasks_owner_date_status
   ON personal_tasks (chat_id, user_id, task_date, status);
+
+  CREATE TABLE IF NOT EXISTS household_assignments (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    cycle_start TEXT NOT NULL,
+    task_date TEXT NOT NULL,
+    chat_id INTEGER NOT NULL,
+    chore_key TEXT NOT NULL,
+    chore_text TEXT NOT NULL,
+    member_name TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    UNIQUE (chat_id, task_date, chore_key)
+  );
+
+  CREATE INDEX IF NOT EXISTS household_assignments_chore_history
+  ON household_assignments (chat_id, chore_key, task_date DESC);
+
+  CREATE TABLE IF NOT EXISTS household_schedule_state (
+    state_key TEXT PRIMARY KEY,
+    state_value TEXT NOT NULL
+  );
+
+  CREATE TABLE IF NOT EXISTS household_daily_notifications (
+    task_date TEXT NOT NULL,
+    chat_id INTEGER NOT NULL,
+    message_id INTEGER NOT NULL,
+    sent_at TEXT NOT NULL,
+    PRIMARY KEY (task_date, chat_id)
+  );
 `);
 
 export function saveMessage(
@@ -269,4 +302,160 @@ export function completePersonalTask(
   );
 
   return result.changes === 1;
+}
+
+function shiftDate(date: string, days: number): string {
+	const shifted = new Date(`${date}T00:00:00.000Z`);
+	shifted.setUTCDate(shifted.getUTCDate() + days);
+	return shifted.toISOString().slice(0, 10);
+}
+
+export function getHouseholdCycleStartDate(today: string): string {
+	const state = db
+		.prepare(`
+			SELECT state_value
+			FROM household_schedule_state
+			WHERE state_key = 'cycle_start_date'
+		`)
+		.get() as { state_value: string } | undefined;
+
+	if (!state) {
+		db.prepare(`
+			INSERT INTO household_schedule_state (state_key, state_value)
+			VALUES ('cycle_start_date', ?)
+		`).run(today);
+		return today;
+	}
+
+	const start = new Date(`${state.state_value}T00:00:00.000Z`);
+	const current = new Date(`${today}T00:00:00.000Z`);
+	const elapsedDays = Math.floor(
+		(current.getTime() - start.getTime()) / 86_400_000,
+	);
+	if (elapsedDays < 7) return state.state_value;
+
+	const cycleStart = shiftDate(
+		state.state_value,
+		Math.floor(elapsedDays / 7) * 7,
+	);
+	db.prepare(`
+		UPDATE household_schedule_state
+		SET state_value = ?
+		WHERE state_key = 'cycle_start_date'
+	`).run(cycleStart);
+	return cycleStart;
+}
+
+export function ensureHouseholdWeeklySchedule(
+	cycleStart: string,
+	chatId: number,
+): void {
+	const createSchedule = db.transaction(() => {
+		const existing = db
+			.prepare(`
+				SELECT COUNT(*) AS count
+				FROM household_assignments
+				WHERE cycle_start = ? AND chat_id = ?
+			`)
+			.get(cycleStart, chatId) as { count: number };
+		if (existing.count > 0) return;
+
+		const historyRows = db
+			.prepare(`
+				SELECT chore_key, member_name
+				FROM household_assignments
+				WHERE chat_id = ? AND task_date < ?
+				ORDER BY task_date DESC, id DESC
+			`)
+			.all(chatId, cycleStart) as Array<{
+				chore_key: string;
+				member_name: HouseholdMember;
+			}>;
+		const lastAssignedByChore = new Map<string, HouseholdMember>();
+		for (const row of historyRows) {
+			if (!lastAssignedByChore.has(row.chore_key)) {
+				lastAssignedByChore.set(row.chore_key, row.member_name);
+			}
+		}
+
+		const assignments = generateHouseholdWeek(
+			cycleStart,
+			lastAssignedByChore,
+		);
+		const insert = db.prepare(`
+			INSERT INTO household_assignments (
+				cycle_start,
+				task_date,
+				chat_id,
+				chore_key,
+				chore_text,
+				member_name,
+				created_at
+			)
+			VALUES (?, ?, ?, ?, ?, ?, ?)
+		`);
+		const createdAt = new Date().toISOString();
+		for (const assignment of assignments) {
+			insert.run(
+				cycleStart,
+				assignment.task_date,
+				chatId,
+				assignment.chore_key,
+				assignment.chore_text,
+				assignment.member_name,
+				createdAt,
+			);
+		}
+	});
+
+	createSchedule();
+}
+
+export function getHouseholdAssignments(
+	taskDate: string,
+	chatId: number,
+): HouseholdAssignment[] {
+	return db
+		.prepare(`
+			SELECT task_date, chore_key, chore_text, member_name
+			FROM household_assignments
+			WHERE task_date = ? AND chat_id = ?
+			ORDER BY id
+		`)
+		.all(taskDate, chatId) as HouseholdAssignment[];
+}
+
+export function hasHouseholdDailyNotification(
+	taskDate: string,
+	chatId: number,
+): boolean {
+	return Boolean(
+		db
+			.prepare(`
+				SELECT 1
+				FROM household_daily_notifications
+				WHERE task_date = ? AND chat_id = ?
+			`)
+			.get(taskDate, chatId),
+	);
+}
+
+export function saveHouseholdDailyNotification(
+	taskDate: string,
+	chatId: number,
+	messageId: number,
+): boolean {
+	const result = db
+		.prepare(`
+			INSERT OR IGNORE INTO household_daily_notifications (
+				task_date,
+				chat_id,
+				message_id,
+				sent_at
+			)
+			VALUES (?, ?, ?, ?)
+		`)
+		.run(taskDate, chatId, messageId, new Date().toISOString());
+
+	return result.changes === 1;
 }
