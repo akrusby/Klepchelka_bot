@@ -56,7 +56,7 @@ const bot = new Bot(token);
 const DAILY_TASK_TEXT = "Андрей, попылесось на кухне";
 const DAILY_TASK_TIME_ZONE = "Europe/Warsaw";
 const BOT_TRIGGER_PATTERN =
-	/(^|[^\p{L}\p{N}_])бот(?=$|[^\p{L}\p{N}_])|@Klepchelka_bot\b/iu;
+	/(^|[^\p{L}\p{N}_])(?:бот|елебот|еле-елебот|балабот|ботан)(?=$|[^\p{L}\p{N}_])|@Klepchelka_bot\b/iu;
 
 function containsBotTrigger(text: string): boolean {
 	return BOT_TRIGGER_PATTERN.test(text);
